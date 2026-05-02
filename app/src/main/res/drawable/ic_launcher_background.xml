@@ -8,18 +8,21 @@
         <aapt:attr name="android:fillColor">
             <gradient
                 android:angle="315"
-                android:endColor="#7CE7FF"
-                android:startColor="#08101D"
-                android:centerColor="#2B6EE8" />
+                android:endColor="#7CF2FF"
+                android:startColor="#07111D"
+                android:centerColor="#1953C9" />
         </aapt:attr>
     </path>
     <path
-        android:fillColor="#22FFFFFF"
-        android:pathData="M18,18m0,-14a14,14 0,1 1,0 28a14,14 0,1 1,0 -28" />
+        android:fillColor="#18FFFFFF"
+        android:pathData="M20,20m0,-18a18,18 0,1 1,0 36a18,18 0,1 1,0 -36" />
     <path
-        android:fillColor="#16FFFFFF"
-        android:pathData="M84,24m0,-18a18,18 0,1 1,0 36a18,18 0,1 1,0 -36" />
+        android:fillColor="#14FFFFFF"
+        android:pathData="M84,22m0,-20a20,20 0,1 1,0 40a20,20 0,1 1,0 -40" />
     <path
-        android:fillColor="#1488D7FF"
-        android:pathData="M70,88m0,-24a24,24 0,1 1,0 48a24,24 0,1 1,0 -48" />
+        android:fillColor="#12A9F4FF"
+        android:pathData="M76,88m0,-26a26,26 0,1 1,0 52a26,26 0,1 1,0 -52" />
+    <path
+        android:fillColor="#20FFD5A6"
+        android:pathData="M32,92m0,-16a16,16 0,1 1,0 32a16,16 0,1 1,0 -32" />
 </vector>

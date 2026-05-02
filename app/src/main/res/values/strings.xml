@@ -1,3 +1,5 @@
 <resources>
-    <string name="app_name">PWA2APP</string>
+    <string name="app_name">PWA Dock</string>
+    <string name="web_notification_channel_name">PWA Dock notifications</string>
+    <string name="web_notification_channel_description">Notifications sent by websites saved in PWA Dock</string>
 </resources>
