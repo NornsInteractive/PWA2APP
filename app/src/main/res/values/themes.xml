@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.PWA2APP" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.NornsAI" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 
-    <style name="Theme.PWA2APP.Starting" parent="Theme.SplashScreen.IconBackground">
-        <item name="windowSplashScreenBackground">#08101D</item>
+    <style name="Theme.NornsAI.Starting" parent="Theme.SplashScreen.IconBackground">
+        <item name="windowSplashScreenBackground">#06101A</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/avd_splash_logo</item>
-        <item name="windowSplashScreenIconBackgroundColor">#14325E</item>
-        <item name="postSplashScreenTheme">@style/Theme.PWA2APP</item>
+        <item name="windowSplashScreenIconBackgroundColor">#0D3C7A</item>
+        <item name="postSplashScreenTheme">@style/Theme.NornsAI</item>
     </style>
 </resources>

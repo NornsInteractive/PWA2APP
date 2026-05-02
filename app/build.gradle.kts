@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.norns.pwa2app"
+    namespace = "com.norns.nornsai"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -12,7 +12,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.norns.pwa2app"
+        applicationId = "com.norns.nornsai"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
