@@ -1,0 +1,12 @@
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_launcher_foreground">
+    <target
+        android:name="root"
+        android:animation="@animator/splash_logo_alpha" />
+    <target
+        android:name="root"
+        android:animation="@animator/splash_logo_scale_x" />
+    <target
+        android:name="root"
+        android:animation="@animator/splash_logo_scale_y" />
+</animated-vector>
