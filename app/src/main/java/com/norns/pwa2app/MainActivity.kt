@@ -146,6 +146,11 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.YearMonth
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.CancellationException
 import java.util.regex.Pattern
@@ -986,6 +991,15 @@ private fun PwaBrowserScreen(
                             GeckoResult<GeckoSession.PromptDelegate.PromptResponse>().apply {
                                 complete(prompt.confirm(AllowOrDeny.ALLOW))
                             }
+                        },
+                        onChoicePromptRequested = { prompt ->
+                            launchChoicePrompt(context, prompt)
+                        },
+                        onColorPromptRequested = { prompt ->
+                            launchColorPrompt(context, prompt)
+                        },
+                        onDateTimePromptRequested = { prompt ->
+                            launchDateTimePrompt(context, prompt)
                         },
                         onSharePromptRequested = { prompt ->
                             GeckoResult<GeckoSession.PromptDelegate.PromptResponse>().apply {
@@ -1922,6 +1936,620 @@ private fun launchSharePrompt(
     )
 }
 
+private fun launchChoicePrompt(
+    context: Context,
+    prompt: GeckoSession.PromptDelegate.ChoicePrompt
+): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+    val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+    val selectableChoices = flattenSelectableChoices(prompt.choices)
+    if (selectableChoices.isEmpty()) {
+        result.complete(prompt.dismiss())
+        return result
+    }
+
+    val labels = selectableChoices.map { it.label }.toTypedArray()
+    val completed = PromptCompletionGuard(result, onDismiss = { prompt.dismiss() })
+    val builder = android.app.AlertDialog.Builder(context)
+        .setTitle(prompt.title?.takeIf { it.isNotBlank() } ?: "Choose an option")
+        .setOnCancelListener { completed.dismiss() }
+
+    prompt.message?.takeIf { it.isNotBlank() }?.let(builder::setMessage)
+
+    when (prompt.type) {
+        GeckoSession.PromptDelegate.ChoicePrompt.Type.MENU -> {
+            builder.setItems(labels) { _, which ->
+                val selected = selectableChoices.getOrNull(which) ?: return@setItems
+                completed.complete(prompt.confirm(selected.id))
+            }
+        }
+
+        GeckoSession.PromptDelegate.ChoicePrompt.Type.SINGLE -> {
+            var selectedIndex = selectableChoices.indexOfFirst { it.selected }
+            builder.setSingleChoiceItems(labels, selectedIndex) { _, which ->
+                selectedIndex = which
+            }
+            builder.setPositiveButton("OK") { _, _ ->
+                val selected = selectableChoices.getOrNull(selectedIndex)
+                if (selected != null) {
+                    completed.complete(prompt.confirm(selected.id))
+                } else {
+                    completed.dismiss()
+                }
+            }
+            builder.setNegativeButton("Cancel") { _, _ -> completed.dismiss() }
+        }
+
+        GeckoSession.PromptDelegate.ChoicePrompt.Type.MULTIPLE -> {
+            val checkedItems = selectableChoices.map { it.selected }.toBooleanArray()
+            builder.setMultiChoiceItems(labels, checkedItems) { _, which, isChecked ->
+                checkedItems[which] = isChecked
+            }
+            builder.setPositiveButton("OK") { _, _ ->
+                val selectedIds = selectableChoices
+                    .mapIndexedNotNull { index, choice -> choice.id.takeIf { checkedItems[index] } }
+                    .toTypedArray()
+                completed.complete(prompt.confirm(selectedIds))
+            }
+            builder.setNegativeButton("Cancel") { _, _ -> completed.dismiss() }
+        }
+
+        else -> {
+            completed.dismiss()
+            return result
+        }
+    }
+
+    val dialog = builder.create()
+    dialog.setOnDismissListener { completed.dismiss() }
+    dialog.show()
+    return result
+}
+
+private fun launchColorPrompt(
+    context: Context,
+    prompt: GeckoSession.PromptDelegate.ColorPrompt
+): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+    val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+    val completed = PromptCompletionGuard(result, onDismiss = { prompt.dismiss() })
+    val presets = prompt.predefinedValues
+        ?.mapNotNull(::normalizeColorValueOrNull)
+        ?.distinct()
+        .orEmpty()
+    val initialColor = normalizeColorValue(
+        prompt.defaultValue
+            ?: presets.firstOrNull()
+            ?: "#2563EB"
+    )
+
+    val container = android.widget.LinearLayout(context).apply {
+        orientation = android.widget.LinearLayout.VERTICAL
+        val padding = (20 * context.resources.displayMetrics.density).toInt()
+        setPadding(padding, padding / 2, padding, padding / 2)
+    }
+    val preview = android.view.View(context).apply {
+        layoutParams = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            (56 * context.resources.displayMetrics.density).toInt()
+        ).apply {
+            bottomMargin = (14 * context.resources.displayMetrics.density).toInt()
+        }
+        background = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = 18 * context.resources.displayMetrics.density
+            setColor(android.graphics.Color.parseColor(initialColor))
+        }
+    }
+    val input = android.widget.EditText(context).apply {
+        setText(initialColor)
+        setSelection(text.length)
+        inputType = android.text.InputType.TYPE_CLASS_TEXT
+        hint = "#2563EB"
+    }
+    input.addTextChangedListener(
+        object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val parsed = normalizeColorValueOrNull(s?.toString()) ?: return
+                (preview.background as? android.graphics.drawable.GradientDrawable)
+                    ?.setColor(android.graphics.Color.parseColor(parsed))
+            }
+        }
+    )
+
+    container.addView(preview)
+    container.addView(input)
+
+    if (presets.isNotEmpty()) {
+        container.addView(
+            android.widget.TextView(context).apply {
+                text = "Suggested colors"
+                setPadding(0, (12 * context.resources.displayMetrics.density).toInt(), 0, 0)
+            }
+        )
+        container.addView(
+            android.widget.GridLayout(context).apply {
+                columnCount = 6
+                useDefaultMargins = true
+                presets.forEach { colorValue ->
+                    addView(
+                        android.widget.FrameLayout(context).apply {
+                            layoutParams = android.widget.GridLayout.LayoutParams().apply {
+                                width = (36 * context.resources.displayMetrics.density).toInt()
+                                height = (36 * context.resources.displayMetrics.density).toInt()
+                            }
+                            background = android.graphics.drawable.GradientDrawable().apply {
+                                shape = android.graphics.drawable.GradientDrawable.OVAL
+                                setColor(android.graphics.Color.parseColor(colorValue))
+                                setStroke(
+                                    (1 * context.resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                                    android.graphics.Color.parseColor("#33000000")
+                                )
+                            }
+                            isClickable = true
+                            isFocusable = true
+                            setOnClickListener {
+                                input.setText(colorValue)
+                                input.setSelection(input.text.length)
+                            }
+                        }
+                    )
+                }
+            }
+        )
+    }
+
+    val dialog = android.app.AlertDialog.Builder(context)
+        .setTitle(prompt.title?.takeIf { it.isNotBlank() } ?: "Choose color")
+        .setView(container)
+        .setPositiveButton("OK") { _, _ ->
+            completed.complete(prompt.confirm(normalizeColorValue(input.text?.toString().orEmpty())))
+        }
+        .setNegativeButton("Cancel") { _, _ -> completed.dismiss() }
+        .setOnCancelListener { completed.dismiss() }
+        .create()
+
+    dialog.setOnDismissListener { completed.dismiss() }
+    dialog.show()
+    return result
+}
+
+private fun launchDateTimePrompt(
+    context: Context,
+    prompt: GeckoSession.PromptDelegate.DateTimePrompt
+): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+    val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+    val completed = PromptCompletionGuard(result, onDismiss = { prompt.dismiss() })
+
+    when (prompt.type) {
+        GeckoSession.PromptDelegate.DateTimePrompt.Type.DATE -> {
+            val initial = parsePromptDate(prompt.defaultValue)
+            val minDate = parsePromptDateOrNull(prompt.minValue)
+            val maxDate = parsePromptDateOrNull(prompt.maxValue)
+            val dialog = android.app.DatePickerDialog(
+                context,
+                { _, year, month, dayOfMonth ->
+                    val selected = LocalDate.of(year, month + 1, dayOfMonth)
+                    completed.complete(
+                        prompt.confirm(
+                            coerceDateWithinBounds(selected, minDate, maxDate)
+                                .format(DateTimeFormatter.ISO_LOCAL_DATE)
+                        )
+                    )
+                },
+                initial.year,
+                initial.monthValue - 1,
+                initial.dayOfMonth
+            )
+            applyDateBounds(dialog, minDate, maxDate)
+            dialog.setOnCancelListener { completed.dismiss() }
+            dialog.show()
+        }
+
+        GeckoSession.PromptDelegate.DateTimePrompt.Type.TIME -> {
+            val initial = parsePromptTime(prompt.defaultValue)
+            val minTime = parsePromptTimeOrNull(prompt.minValue)
+            val maxTime = parsePromptTimeOrNull(prompt.maxValue)
+            val dialog = android.app.TimePickerDialog(
+                context,
+                { _, hourOfDay, minute ->
+                    completed.complete(
+                        prompt.confirm(
+                            coerceTimeWithinBounds(LocalTime.of(hourOfDay, minute), minTime, maxTime)
+                                .format(HTML_TIME_FORMATTER)
+                        )
+                    )
+                },
+                initial.hour,
+                initial.minute,
+                true
+            )
+            dialog.setOnCancelListener { completed.dismiss() }
+            dialog.show()
+        }
+
+        GeckoSession.PromptDelegate.DateTimePrompt.Type.DATETIME_LOCAL -> {
+            val initial = parsePromptDateTime(prompt.defaultValue)
+            val minDateTime = parsePromptDateTimeOrNull(prompt.minValue)
+            val maxDateTime = parsePromptDateTimeOrNull(prompt.maxValue)
+            val dateDialog = android.app.DatePickerDialog(
+                context,
+                { _, year, month, dayOfMonth ->
+                    val timeDialog = android.app.TimePickerDialog(
+                        context,
+                        { _, hourOfDay, minute ->
+                            val selected = LocalDateTime.of(year, month + 1, dayOfMonth, hourOfDay, minute)
+                            completed.complete(
+                                prompt.confirm(
+                                    coerceDateTimeWithinBounds(selected, minDateTime, maxDateTime)
+                                        .format(HTML_DATETIME_LOCAL_FORMATTER)
+                                )
+                            )
+                        },
+                        initial.hour,
+                        initial.minute,
+                        true
+                    )
+                    timeDialog.setOnCancelListener { completed.dismiss() }
+                    timeDialog.show()
+                },
+                initial.year,
+                initial.monthValue - 1,
+                initial.dayOfMonth
+            )
+            applyDateBounds(
+                dialog = dateDialog,
+                minDate = minDateTime?.toLocalDate(),
+                maxDate = maxDateTime?.toLocalDate()
+            )
+            dateDialog.setOnCancelListener { completed.dismiss() }
+            dateDialog.show()
+        }
+
+        GeckoSession.PromptDelegate.DateTimePrompt.Type.MONTH -> {
+            return launchMonthPrompt(
+                context = context,
+                prompt = prompt
+            )
+        }
+
+        GeckoSession.PromptDelegate.DateTimePrompt.Type.WEEK -> {
+            return launchWeekPrompt(context, prompt)
+        }
+
+        else -> completed.dismiss()
+    }
+
+    return result
+}
+
+private fun flattenSelectableChoices(
+    choices: Array<GeckoSession.PromptDelegate.ChoicePrompt.Choice>,
+    parentLabel: String? = null
+): List<SelectableChoice> = buildList {
+    choices.forEach { choice ->
+        if (choice.separator) return@forEach
+        val label = buildString {
+            if (!parentLabel.isNullOrBlank()) {
+                append(parentLabel)
+                append(" / ")
+            }
+            append(choice.label)
+        }
+        val childItems = choice.items
+        if (!childItems.isNullOrEmpty()) {
+            addAll(flattenSelectableChoices(childItems, label))
+        } else if (!choice.disabled) {
+            add(SelectableChoice(id = choice.id, label = label, selected = choice.selected))
+        }
+    }
+}
+
+private fun parsePromptDate(value: String?): LocalDate {
+    return runCatching { LocalDate.parse(value?.take(10).orEmpty()) }.getOrElse { LocalDate.now() }
+}
+
+private fun parsePromptTime(value: String?): LocalTime {
+    val normalized = value?.substring(0, min(value.length, 5)).orEmpty()
+    return runCatching { LocalTime.parse(normalized, HTML_TIME_FORMATTER) }
+        .getOrElse { LocalTime.now().withSecond(0).withNano(0) }
+}
+
+private fun parsePromptDateTime(value: String?): LocalDateTime {
+    val normalized = value?.take(16).orEmpty()
+    return runCatching { LocalDateTime.parse(normalized, HTML_DATETIME_LOCAL_FORMATTER) }
+        .getOrElse { LocalDateTime.now().withSecond(0).withNano(0) }
+}
+
+private fun formatDate(year: Int, month: Int, day: Int): String {
+    return LocalDate.of(year, month, day).format(DateTimeFormatter.ISO_LOCAL_DATE)
+}
+
+private fun formatTime(hour: Int, minute: Int): String {
+    return LocalTime.of(hour, minute).format(HTML_TIME_FORMATTER)
+}
+
+private fun formatDateTimeLocal(
+    year: Int,
+    month: Int,
+    day: Int,
+    hour: Int,
+    minute: Int
+): String {
+    return LocalDateTime.of(year, month, day, hour, minute).format(HTML_DATETIME_LOCAL_FORMATTER)
+}
+
+private fun normalizeMonthValue(value: String?): String {
+    val normalized = value?.trim().orEmpty()
+    return runCatching { YearMonth.parse(normalized) }
+        .map { it.toString() }
+        .getOrElse { YearMonth.now().toString() }
+}
+
+private fun normalizeWeekValue(value: String?): String {
+    val normalized = value?.trim().orEmpty()
+    return if (normalized.matches(Regex("\\d{4}-W\\d{2}"))) {
+        normalized
+    } else {
+        currentWeekValue()
+    }
+}
+
+private fun currentWeekValue(): String {
+    val today = LocalDate.now()
+    val week = today.get(java.time.temporal.WeekFields.ISO.weekOfWeekBasedYear())
+    val year = today.get(java.time.temporal.WeekFields.ISO.weekBasedYear())
+    return String.format(Locale.ROOT, "%04d-W%02d", year, week)
+}
+
+private fun normalizeColorValue(value: String): String {
+    return normalizeColorValueOrNull(value) ?: "#2563EB"
+}
+
+private fun normalizeColorValueOrNull(value: String?): String? {
+    val trimmed = value?.trim().orEmpty()
+    if (trimmed.matches(Regex("#?[0-9a-fA-F]{6}"))) {
+        return if (trimmed.startsWith("#")) trimmed.uppercase(Locale.ROOT) else "#${trimmed.uppercase(Locale.ROOT)}"
+    }
+    if (trimmed.matches(Regex("#?[0-9a-fA-F]{3}"))) {
+        val raw = trimmed.removePrefix("#").uppercase(Locale.ROOT)
+        return "#${raw[0]}${raw[0]}${raw[1]}${raw[1]}${raw[2]}${raw[2]}"
+    }
+    return null
+}
+
+private fun launchMonthPrompt(
+    context: Context,
+    prompt: GeckoSession.PromptDelegate.DateTimePrompt
+): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+    val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+    val completed = PromptCompletionGuard(result, onDismiss = { prompt.dismiss() })
+    val initial = parsePromptMonth(prompt.defaultValue) ?: YearMonth.now()
+    val minMonth = parsePromptMonth(prompt.minValue)
+    val maxMonth = parsePromptMonth(prompt.maxValue)
+    val yearPicker = buildNumberPicker(context)
+    val monthPicker = buildNumberPicker(context)
+
+    configureYearPicker(
+        picker = yearPicker,
+        initialYear = initial.year,
+        minYear = minMonth?.year,
+        maxYear = maxMonth?.year
+    )
+    fun updateMonthPicker(year: Int, preferredMonth: Int = monthPicker.value.takeIf { it != 0 } ?: initial.monthValue) {
+        val minValue = if (minMonth?.year == year) minMonth.monthValue else 1
+        val maxValue = if (maxMonth?.year == year) maxMonth.monthValue else 12
+        monthPicker.displayedValues = null
+        monthPicker.minValue = minValue
+        monthPicker.maxValue = maxValue
+        monthPicker.displayedValues = (minValue..maxValue)
+            .map { String.format(Locale.ROOT, "%02d", it) }
+            .toTypedArray()
+        monthPicker.value = preferredMonth.coerceIn(minValue, maxValue)
+    }
+    updateMonthPicker(yearPicker.value, initial.monthValue)
+    yearPicker.setOnValueChangedListener { _, _, newVal ->
+        updateMonthPicker(newVal)
+    }
+
+    val dialog = android.app.AlertDialog.Builder(context)
+        .setTitle(prompt.title?.takeIf { it.isNotBlank() } ?: "Choose month")
+        .setView(buildPickerLayout(context, yearPicker, monthPicker))
+        .setPositiveButton("OK") { _, _ ->
+            completed.complete(
+                prompt.confirm(
+                    YearMonth.of(yearPicker.value, monthPicker.value).toString()
+                )
+            )
+        }
+        .setNegativeButton("Cancel") { _, _ -> completed.dismiss() }
+        .setOnCancelListener { completed.dismiss() }
+        .create()
+    dialog.setOnDismissListener { completed.dismiss() }
+    dialog.show()
+    return result
+}
+
+private fun launchWeekPrompt(
+    context: Context,
+    prompt: GeckoSession.PromptDelegate.DateTimePrompt
+): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+    val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+    val completed = PromptCompletionGuard(result, onDismiss = { prompt.dismiss() })
+    val initial = parsePromptWeek(prompt.defaultValue) ?: currentWeekValueData()
+    val minWeek = parsePromptWeek(prompt.minValue)
+    val maxWeek = parsePromptWeek(prompt.maxValue)
+    val yearPicker = buildNumberPicker(context)
+    val weekPicker = buildNumberPicker(context)
+
+    configureYearPicker(
+        picker = yearPicker,
+        initialYear = initial.year,
+        minYear = minWeek?.year,
+        maxYear = maxWeek?.year
+    )
+    fun updateWeekPicker(year: Int, preferredWeek: Int = weekPicker.value.takeIf { it != 0 } ?: initial.week) {
+        val minValue = if (minWeek?.year == year) minWeek.week else 1
+        val maxValue = if (maxWeek?.year == year) maxWeek.week else weeksInWeekBasedYear(year)
+        weekPicker.displayedValues = null
+        weekPicker.minValue = minValue
+        weekPicker.maxValue = maxValue
+        weekPicker.displayedValues = (minValue..maxValue)
+            .map { String.format(Locale.ROOT, "W%02d", it) }
+            .toTypedArray()
+        weekPicker.value = preferredWeek.coerceIn(minValue, maxValue)
+    }
+    updateWeekPicker(yearPicker.value, initial.week)
+    yearPicker.setOnValueChangedListener { _, _, newVal ->
+        updateWeekPicker(newVal)
+    }
+
+    val dialog = android.app.AlertDialog.Builder(context)
+        .setTitle(prompt.title?.takeIf { it.isNotBlank() } ?: "Choose week")
+        .setView(buildPickerLayout(context, yearPicker, weekPicker))
+        .setPositiveButton("OK") { _, _ ->
+            completed.complete(
+                prompt.confirm(formatWeekValue(yearPicker.value, weekPicker.value))
+            )
+        }
+        .setNegativeButton("Cancel") { _, _ -> completed.dismiss() }
+        .setOnCancelListener { completed.dismiss() }
+        .create()
+    dialog.setOnDismissListener { completed.dismiss() }
+    dialog.show()
+    return result
+}
+
+private fun buildNumberPicker(context: Context): android.widget.NumberPicker {
+    return android.widget.NumberPicker(context).apply {
+        descendantFocusability = android.widget.NumberPicker.FOCUS_BLOCK_DESCENDANTS
+        wrapSelectorWheel = false
+    }
+}
+
+private fun configureYearPicker(
+    picker: android.widget.NumberPicker,
+    initialYear: Int,
+    minYear: Int?,
+    maxYear: Int?
+) {
+    val resolvedMin = minYear ?: min(initialYear, LocalDate.now().year) - 20
+    val resolvedMax = maxYear ?: max(initialYear, LocalDate.now().year) + 20
+    picker.minValue = resolvedMin
+    picker.maxValue = max(resolvedMin, resolvedMax)
+    picker.value = initialYear.coerceIn(picker.minValue, picker.maxValue)
+}
+
+private fun buildPickerLayout(
+    context: Context,
+    vararg pickers: android.widget.NumberPicker
+): android.widget.LinearLayout {
+    val density = context.resources.displayMetrics.density
+    return android.widget.LinearLayout(context).apply {
+        orientation = android.widget.LinearLayout.HORIZONTAL
+        val padding = (20 * density).toInt()
+        setPadding(padding, padding / 2, padding, padding / 2)
+        pickers.forEach { picker ->
+            addView(
+                picker,
+                android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+        }
+    }
+}
+
+private fun parsePromptDateOrNull(value: String?): LocalDate? {
+    val normalized = value?.take(10)?.takeIf { it.isNotBlank() } ?: return null
+    return runCatching { LocalDate.parse(normalized) }.getOrNull()
+}
+
+private fun parsePromptTimeOrNull(value: String?): LocalTime? {
+    val normalized = value?.take(5)?.takeIf { it.isNotBlank() } ?: return null
+    return runCatching { LocalTime.parse(normalized, HTML_TIME_FORMATTER) }.getOrNull()
+}
+
+private fun parsePromptDateTimeOrNull(value: String?): LocalDateTime? {
+    val normalized = value?.take(16)?.takeIf { it.isNotBlank() } ?: return null
+    return runCatching { LocalDateTime.parse(normalized, HTML_DATETIME_LOCAL_FORMATTER) }.getOrNull()
+}
+
+private fun parsePromptMonth(value: String?): YearMonth? {
+    val normalized = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    return runCatching { YearMonth.parse(normalized) }.getOrNull()
+}
+
+private fun parsePromptWeek(value: String?): WeekValue? {
+    val normalized = value?.trim()?.takeIf { it.matches(Regex("\\d{4}-W\\d{2}")) } ?: return null
+    return WeekValue(
+        year = normalized.substring(0, 4).toInt(),
+        week = normalized.substring(6, 8).toInt()
+    )
+}
+
+private fun currentWeekValueData(): WeekValue {
+    val today = LocalDate.now()
+    return WeekValue(
+        year = today.get(java.time.temporal.WeekFields.ISO.weekBasedYear()),
+        week = today.get(java.time.temporal.WeekFields.ISO.weekOfWeekBasedYear())
+    )
+}
+
+private fun formatWeekValue(year: Int, week: Int): String {
+    return String.format(Locale.ROOT, "%04d-W%02d", year, week)
+}
+
+private fun weeksInWeekBasedYear(year: Int): Int {
+    return LocalDate.of(year, 12, 28).get(java.time.temporal.WeekFields.ISO.weekOfWeekBasedYear())
+}
+
+private fun applyDateBounds(
+    dialog: android.app.DatePickerDialog,
+    minDate: LocalDate?,
+    maxDate: LocalDate?
+) {
+    val datePicker = dialog.datePicker
+    minDate?.let {
+        val millis = it.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        datePicker.minDate = millis
+    }
+    maxDate?.let {
+        val millis = it.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        datePicker.maxDate = millis
+    }
+}
+
+private fun coerceDateWithinBounds(
+    value: LocalDate,
+    minDate: LocalDate?,
+    maxDate: LocalDate?
+): LocalDate {
+    var resolved = value
+    if (minDate != null && resolved.isBefore(minDate)) resolved = minDate
+    if (maxDate != null && resolved.isAfter(maxDate)) resolved = maxDate
+    return resolved
+}
+
+private fun coerceTimeWithinBounds(
+    value: LocalTime,
+    minTime: LocalTime?,
+    maxTime: LocalTime?
+): LocalTime {
+    var resolved = value
+    if (minTime != null && resolved.isBefore(minTime)) resolved = minTime
+    if (maxTime != null && resolved.isAfter(maxTime)) resolved = maxTime
+    return resolved
+}
+
+private fun coerceDateTimeWithinBounds(
+    value: LocalDateTime,
+    minDateTime: LocalDateTime?,
+    maxDateTime: LocalDateTime?
+): LocalDateTime {
+    var resolved = value
+    if (minDateTime != null && resolved.isBefore(minDateTime)) resolved = minDateTime
+    if (maxDateTime != null && resolved.isAfter(maxDateTime)) resolved = maxDateTime
+    return resolved
+}
+
 private fun sampleBrowserChromeColor(bitmap: Bitmap): Color? {
     if (bitmap.width <= 0 || bitmap.height <= 0) return null
 
@@ -2248,6 +2876,15 @@ private fun createAppGeckoSession(
     onPopupPromptRequested: (
         GeckoSession.PromptDelegate.PopupPrompt
     ) -> GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+    onChoicePromptRequested: (
+        GeckoSession.PromptDelegate.ChoicePrompt
+    ) -> GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+    onColorPromptRequested: (
+        GeckoSession.PromptDelegate.ColorPrompt
+    ) -> GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+    onDateTimePromptRequested: (
+        GeckoSession.PromptDelegate.DateTimePrompt
+    ) -> GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
     onSharePromptRequested: (
         GeckoSession.PromptDelegate.SharePrompt
     ) -> GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
@@ -2401,6 +3038,27 @@ private fun createAppGeckoSession(
                 prompt: GeckoSession.PromptDelegate.PopupPrompt
             ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
                 return onPopupPromptRequested(prompt)
+            }
+
+            override fun onChoicePrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.ChoicePrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                return onChoicePromptRequested(prompt)
+            }
+
+            override fun onColorPrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.ColorPrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                return onColorPromptRequested(prompt)
+            }
+
+            override fun onDateTimePrompt(
+                session: GeckoSession,
+                prompt: GeckoSession.PromptDelegate.DateTimePrompt
+            ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                return onDateTimePromptRequested(prompt)
             }
 
             override fun onSharePrompt(
@@ -2821,6 +3479,17 @@ private data class BuiltFilePromptRequest(
     val persistable: Boolean
 )
 
+private data class SelectableChoice(
+    val id: String,
+    val label: String,
+    val selected: Boolean
+)
+
+private data class WeekValue(
+    val year: Int,
+    val week: Int
+)
+
 private data class PendingFilePromptRequest(
     val prompt: GeckoSession.PromptDelegate.FilePrompt,
     val result: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
@@ -2878,6 +3547,25 @@ private data class PendingSiteActionDialog(
     val action: SiteAction
 )
 
+private class PromptCompletionGuard(
+    private val result: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>,
+    private val onDismiss: () -> GeckoSession.PromptDelegate.PromptResponse
+) {
+    private var completed = false
+
+    fun complete(response: GeckoSession.PromptDelegate.PromptResponse) {
+        if (completed) return
+        completed = true
+        result.complete(response)
+    }
+
+    fun dismiss() {
+        if (completed) return
+        completed = true
+        result.complete(onDismiss())
+    }
+}
+
 private enum class SiteAction {
     DeleteSite,
     ClearSession
@@ -2926,6 +3614,9 @@ private const val ACTION_WEB_NOTIFICATION_CLICK = "com.norns.pwa2app.WEB_NOTIFIC
 private const val ACTION_WEB_NOTIFICATION_DISMISS = "com.norns.pwa2app.WEB_NOTIFICATION_DISMISS"
 private const val PENDING_INTENT_FLAGS =
     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+private val HTML_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+private val HTML_DATETIME_LOCAL_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm")
 private val LINK_TAG_REGEX = Regex("<link\\b[^>]*>", setOf(RegexOption.IGNORE_CASE))
 private val META_TAG_REGEX = Regex("<meta\\b[^>]*>", setOf(RegexOption.IGNORE_CASE))
 private val RGB_COLOR_REGEX = Regex(
