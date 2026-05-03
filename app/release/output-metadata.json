@@ -4,7 +4,7 @@
     "type": "APK",
     "kind": "Directory"
   },
-  "applicationId": "com.norns.pwa2app",
+  "applicationId": "com.norns.nornsai",
   "variantName": "release",
   "elements": [
     {

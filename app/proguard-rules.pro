@@ -19,3 +19,11 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Keep manifest entry points and prompt-related models used across
+# Android/Gecko boundaries.
+-keep class com.norns.nornsai.MainActivity { *; }
+-keep class com.norns.nornsai.WebNotificationReceiver { *; }
+
+# Preserve line information for crash diagnostics in release builds.
+-keepattributes SourceFile,LineNumberTable

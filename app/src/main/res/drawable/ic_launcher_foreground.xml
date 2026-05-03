@@ -5,22 +5,7 @@
     android:viewportHeight="108">
     <group android:name="root">
         <path
-            android:fillColor="#1C030A14"
-            android:pathData="M24,18H39.5L68.5,61.2V18H84V90H68.4L39.4,46.7V90H24Z" />
-        <path
-            android:fillColor="#18FFFFFF"
-            android:pathData="M54,14m0,-28a28,28 0,1 1,0 56a28,28 0,1 1,0 -56" />
-        <path
-            android:fillColor="#F7FBFF"
+            android:fillColor="#D62828"
             android:pathData="M26,18H40.2L67.8,58.8V18H82V90H67.8L40.2,49.2V90H26Z" />
-        <path
-            android:fillColor="#90FFFFFF"
-            android:pathData="M34,22H40.2L67.8,62.2V54.1L41.6,22H34Z" />
-        <path
-            android:fillColor="#4C1D62E8"
-            android:pathData="M54.8,48.5L67.8,67.6V90H82V18H68V53.5Z" />
-        <path
-            android:fillColor="#2400E2FF"
-            android:pathData="M61,77m0,-10a10,10 0,1 1,0 20a10,10 0,1 1,0 -20" />
     </group>
 </vector>

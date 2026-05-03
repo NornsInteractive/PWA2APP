@@ -138,6 +138,7 @@ import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebNotification
 import org.mozilla.geckoview.WebNotificationDelegate
@@ -203,34 +204,34 @@ class MainActivity : ComponentActivity() {
 
 class WebNotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val notification = intent.parcelableExtra<WebNotification>(EXTRA_WEB_NOTIFICATION) ?: return
-        val notificationId = intent.getIntExtra(EXTRA_WEB_NOTIFICATION_ID, notification.tag.hashCode())
+        val notification = intent.parcelableExtra<WebNotification>(EXTRA_WEB_NOTIFICATION)
+        val notificationId = intent.getIntExtra(
+            EXTRA_WEB_NOTIFICATION_ID,
+            notification?.tag?.hashCode() ?: 0
+        )
+        val launchUrl = resolveLaunchUrl(intent)
 
         when (intent.action) {
             ACTION_WEB_NOTIFICATION_CLICK -> {
                 val actionName = intent.getStringExtra(EXTRA_WEB_NOTIFICATION_ACTION)
-                if (actionName.isNullOrBlank()) {
-                    notification.click()
-                } else {
-                    notification.click(actionName)
-                }
-                val sourceUrl = notification.source?.trim().orEmpty()
-                val openIntent = Intent(context, MainActivity::class.java).apply {
-                    action = Intent.ACTION_VIEW
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    if (sourceUrl.isNotEmpty()) {
-                        putExtra(EXTRA_LAUNCH_URL, sourceUrl)
+                runCatching {
+                    if (actionName.isNullOrBlank()) {
+                        notification?.click()
+                    } else {
+                        notification?.click(actionName)
                     }
                 }
-                context.startActivity(openIntent)
+                launchMainActivity(context, launchUrl)
             }
 
             ACTION_WEB_NOTIFICATION_DISMISS -> {
-                notification.dismiss()
+                runCatching { notification?.dismiss() }
             }
         }
 
-        NotificationManagerCompat.from(context).cancel(notificationId)
+        if (notificationId != 0) {
+            NotificationManagerCompat.from(context).cancel(notificationId)
+        }
     }
 }
 
@@ -526,7 +527,10 @@ private fun PwaBrowserScreen(
                             requestAndroidPermissions(
                                 arrayOf(Manifest.permission.POST_NOTIFICATIONS)
                             ) { granted ->
-                                result.complete(
+                                completeContentPermissionRequest(
+                                    runtime = runtime,
+                                    permission = permission,
+                                    result = result,
                                     if (granted) {
                                         GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
                                     } else {
@@ -535,7 +539,10 @@ private fun PwaBrowserScreen(
                                 )
                             }
                         } else {
-                            result.complete(
+                            completeContentPermissionRequest(
+                                runtime = runtime,
+                                permission = permission,
+                                result = result,
                                 GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
                             )
                         }
@@ -918,6 +925,13 @@ private object GeckoRuntimeHolder {
     }
 }
 
+private fun buildDedicatedSessionSettings(): GeckoSessionSettings {
+    return GeckoSessionSettings.Builder()
+        .usePrivateMode(false)
+        .contextId(GECKO_SESSION_CONTEXT_ID)
+        .build()
+}
+
 private inline fun <reified T : android.os.Parcelable> Intent.parcelableExtra(key: String): T? {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         getParcelableExtra(key, T::class.java)
@@ -930,6 +944,41 @@ private inline fun <reified T : android.os.Parcelable> Intent.parcelableExtra(ke
 private fun hasAppPermission(context: Context, permission: String): Boolean {
     return ContextCompat.checkSelfPermission(context, permission) ==
         android.content.pm.PackageManager.PERMISSION_GRANTED
+}
+
+private fun completeContentPermissionRequest(
+    runtime: GeckoRuntime,
+    permission: GeckoSession.PermissionDelegate.ContentPermission,
+    result: GeckoResult<Int>,
+    value: Int
+) {
+    runCatching {
+        runtime.storageController.setPermission(permission, value)
+    }
+    result.complete(value)
+}
+
+private fun launchMainActivity(context: Context, launchUrl: String) {
+    context.startActivity(
+        Intent(context, MainActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_LAUNCH_URL, launchUrl)
+        }
+    )
+}
+
+private fun resolveNotificationLaunchUrl(sourceUrl: String?): String {
+    val normalizedUrl = sourceUrl
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?.let(::normalizeUrl)
+        ?: return DEDICATED_SITE_URL
+    return if (isDedicatedSiteUri(Uri.parse(normalizedUrl))) {
+        normalizedUrl
+    } else {
+        DEDICATED_SITE_URL
+    }
 }
 
 @SuppressLint("MissingPermission")
@@ -951,6 +1000,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
         ?: "Website notification"
     val text = notification.text?.takeIf { it.isNotBlank() }
         ?: notification.source.orEmpty()
+    val launchUrl = resolveNotificationLaunchUrl(notification.source)
 
     val contentIntent = PendingIntent.getBroadcast(
         context,
@@ -959,6 +1009,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
             action = ACTION_WEB_NOTIFICATION_CLICK
             putExtra(EXTRA_WEB_NOTIFICATION, notification)
             putExtra(EXTRA_WEB_NOTIFICATION_ID, notificationId)
+            putExtra(EXTRA_LAUNCH_URL, launchUrl)
         },
         PENDING_INTENT_FLAGS
     )
@@ -969,6 +1020,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
             action = ACTION_WEB_NOTIFICATION_DISMISS
             putExtra(EXTRA_WEB_NOTIFICATION, notification)
             putExtra(EXTRA_WEB_NOTIFICATION_ID, notificationId)
+            putExtra(EXTRA_LAUNCH_URL, launchUrl)
         },
         PENDING_INTENT_FLAGS
     )
@@ -981,7 +1033,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
         .setContentIntent(contentIntent)
         .setDeleteIntent(deleteIntent)
         .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
 
     if (notification.silent) {
@@ -1001,6 +1053,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
                 putExtra(EXTRA_WEB_NOTIFICATION, notification)
                 putExtra(EXTRA_WEB_NOTIFICATION_ID, notificationId)
                 putExtra(EXTRA_WEB_NOTIFICATION_ACTION, action.name)
+                putExtra(EXTRA_LAUNCH_URL, launchUrl)
             },
             PENDING_INTENT_FLAGS
         )
@@ -1027,9 +1080,12 @@ private fun ensureWebNotificationChannel(context: Context) {
         NotificationChannel(
             WEB_NOTIFICATION_CHANNEL_ID,
             context.getString(R.string.web_notification_channel_name),
-            NotificationManager.IMPORTANCE_DEFAULT
+            NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = context.getString(R.string.web_notification_channel_description)
+            enableLights(true)
+            enableVibration(true)
+            setShowBadge(true)
         }
     )
 }
@@ -1397,7 +1453,7 @@ private fun createAppGeckoSession(
         GeckoSession.PromptDelegate.AuthPrompt
     ) -> GeckoResult<GeckoSession.PromptDelegate.PromptResponse>
 ): GeckoSession {
-    return GeckoSession().apply {
+    return GeckoSession(buildDedicatedSessionSettings()).apply {
         contentDelegate = object : GeckoSession.ContentDelegate {
             override fun onWebAppManifest(session: GeckoSession, manifest: JSONObject) {
                 val parsedColor = parseCssColor(
@@ -1852,7 +1908,8 @@ private const val CHROME_COLOR_SAMPLE_INTERVAL_MS = 900L
 private const val APP_USER_AGENT = "NornsAI/1.0"
 private const val DEDICATED_SITE_URL = "https://ai.norns.dpdns.org/"
 private const val DEDICATED_SITE_HOST = "ai.norns.dpdns.org"
-private const val WEB_NOTIFICATION_CHANNEL_ID = "web_notifications"
+private const val WEB_NOTIFICATION_CHANNEL_ID = "nornsai_messages"
+private const val GECKO_SESSION_CONTEXT_ID = "nornsai"
 private const val ACTION_WEB_NOTIFICATION_CLICK = "com.norns.nornsai.WEB_NOTIFICATION_CLICK"
 private const val ACTION_WEB_NOTIFICATION_DISMISS = "com.norns.nornsai.WEB_NOTIFICATION_DISMISS"
 private const val PENDING_INTENT_FLAGS =
