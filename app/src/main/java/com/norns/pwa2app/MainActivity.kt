@@ -137,6 +137,7 @@ import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebNotification
 import org.mozilla.geckoview.WebNotificationDelegate
@@ -203,34 +204,36 @@ class MainActivity : ComponentActivity() {
 
 class WebNotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val notification = intent.parcelableExtra<WebNotification>(EXTRA_WEB_NOTIFICATION) ?: return
-        val notificationId = intent.getIntExtra(EXTRA_WEB_NOTIFICATION_ID, notification.tag.hashCode())
+        val notification = intent.parcelableExtra<WebNotification>(EXTRA_WEB_NOTIFICATION)
+        val notificationId = intent.getIntExtra(
+            EXTRA_WEB_NOTIFICATION_ID,
+            notification?.tag?.hashCode() ?: 0
+        )
+        val launchUrl = resolveNotificationLaunchUrl(
+            intent.getStringExtra(EXTRA_SHORTCUT_URL)
+        ) ?: resolveNotificationLaunchUrl(notification?.source)
 
         when (intent.action) {
             ACTION_WEB_NOTIFICATION_CLICK -> {
                 val actionName = intent.getStringExtra(EXTRA_WEB_NOTIFICATION_ACTION)
-                if (actionName.isNullOrBlank()) {
-                    notification.click()
-                } else {
-                    notification.click(actionName)
-                }
-                val sourceUrl = notification.source?.trim().orEmpty()
-                if (sourceUrl.isNotEmpty()) {
-                    val openIntent = Intent(context, MainActivity::class.java).apply {
-                        action = Intent.ACTION_VIEW
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                        putExtra(EXTRA_SHORTCUT_URL, sourceUrl)
+                runCatching {
+                    if (actionName.isNullOrBlank()) {
+                        notification?.click()
+                    } else {
+                        notification?.click(actionName)
                     }
-                    context.startActivity(openIntent)
                 }
+                launchMainActivity(context, launchUrl)
             }
 
             ACTION_WEB_NOTIFICATION_DISMISS -> {
-                notification.dismiss()
+                runCatching { notification?.dismiss() }
             }
         }
 
-        NotificationManagerCompat.from(context).cancel(notificationId)
+        if (notificationId != 0) {
+            NotificationManagerCompat.from(context).cancel(notificationId)
+        }
     }
 }
 
@@ -248,6 +251,7 @@ fun PwaContainerApp(
     var currentUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var isShortcutSession by rememberSaveable { mutableStateOf(false) }
     var errorText by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingSiteActionDialog by remember { mutableStateOf<PendingSiteActionDialog?>(null) }
 
     LaunchedEffect(shortcutLaunchUrl, sites) {
         if (shortcutLaunchUrl.isNullOrBlank()) return@LaunchedEffect
@@ -325,8 +329,16 @@ fun PwaContainerApp(
                 }
             },
             onDeleteClicked = { site ->
-                sites = sites.filterNot { it.id == site.id }
-                saveSites(context, sites)
+                pendingSiteActionDialog = PendingSiteActionDialog(
+                    site = site,
+                    action = SiteAction.DeleteSite
+                )
+            },
+            onClearSessionClicked = { site ->
+                pendingSiteActionDialog = PendingSiteActionDialog(
+                    site = site,
+                    action = SiteAction.ClearSession
+                )
             },
             onSiteIconResolved = { site, iconUrl ->
                 if (site.iconUrl == iconUrl) return@HomeScreen
@@ -337,6 +349,33 @@ fun PwaContainerApp(
                 saveSites(context, updatedSites)
             }
         )
+        pendingSiteActionDialog?.let { dialog ->
+            SiteActionConfirmDialog(
+                dialog = dialog,
+                onDismiss = { pendingSiteActionDialog = null },
+                onConfirm = {
+                    pendingSiteActionDialog = null
+                    when (dialog.action) {
+                        SiteAction.DeleteSite -> {
+                            sites = sites.filterNot { it.id == dialog.site.id }
+                            saveSites(context, sites)
+                        }
+
+                        SiteAction.ClearSession -> {
+                            scope.launch {
+                                val cleared = clearSiteSession(context, dialog.site)
+                                val message = if (cleared) {
+                                    "Session cleared for ${dialog.site.name}"
+                                } else {
+                                    "Failed to clear session for ${dialog.site.name}"
+                                }
+                                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                }
+            )
+        }
     } else {
         val displayName = sites.firstOrNull { it.url.equals(currentUrl, ignoreCase = true) }?.name
             ?: defaultNameForUrl(currentUrl!!)
@@ -368,6 +407,7 @@ private fun HomeScreen(
     onOpenClicked: (SavedSite) -> Unit,
     onCreateShortcutClicked: (SavedSite) -> Unit,
     onDeleteClicked: (SavedSite) -> Unit,
+    onClearSessionClicked: (SavedSite) -> Unit,
     onSiteIconResolved: (SavedSite, String) -> Unit
 ) {
     var revealContent by rememberSaveable { mutableStateOf(false) }
@@ -506,6 +546,7 @@ private fun HomeScreen(
                                 site = site,
                                 onOpenClicked = { onOpenClicked(site) },
                                 onCreateShortcutClicked = { onCreateShortcutClicked(site) },
+                                onClearSessionClicked = { onClearSessionClicked(site) },
                                 onDeleteClicked = { onDeleteClicked(site) },
                                 onSiteIconResolved = { iconUrl -> onSiteIconResolved(site, iconUrl) }
                             )
@@ -886,8 +927,11 @@ private fun PwaBrowserScreen(
                                 requestAndroidPermissions(
                                     arrayOf(Manifest.permission.POST_NOTIFICATIONS)
                                 ) { granted ->
-                                    result.complete(
-                                        if (granted) {
+                                    completeContentPermissionRequest(
+                                        runtime = runtime,
+                                        permission = permission,
+                                        result = result,
+                                        value = if (granted) {
                                             GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
                                         } else {
                                             GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY
@@ -895,8 +939,11 @@ private fun PwaBrowserScreen(
                                     )
                                 }
                             } else {
-                                result.complete(
-                                    GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
+                                completeContentPermissionRequest(
+                                    runtime = runtime,
+                                    permission = permission,
+                                    result = result,
+                                    value = GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
                                 )
                             }
                             result
@@ -1278,6 +1325,7 @@ private fun SiteCard(
     site: SavedSite,
     onOpenClicked: () -> Unit,
     onCreateShortcutClicked: () -> Unit,
+    onClearSessionClicked: () -> Unit,
     onDeleteClicked: () -> Unit,
     onSiteIconResolved: (String) -> Unit
 ) {
@@ -1341,11 +1389,21 @@ private fun SiteCard(
         ) {
             Text("Shortcut")
         }
-        TextButton(
-            onClick = onDeleteClicked,
-            modifier = Modifier.align(Alignment.End)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Delete")
+            FilledTonalButton(
+                onClick = onClearSessionClicked,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Text("Clear session")
+            }
+            TextButton(onClick = onDeleteClicked) {
+                Text("Delete")
+            }
         }
     }
 }
@@ -1620,6 +1678,66 @@ private object GeckoRuntimeHolder {
     }
 }
 
+@Composable
+private fun SiteActionConfirmDialog(
+    dialog: PendingSiteActionDialog,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    val title = when (dialog.action) {
+        SiteAction.DeleteSite -> "Delete app?"
+        SiteAction.ClearSession -> "Clear session?"
+    }
+    val message = when (dialog.action) {
+        SiteAction.DeleteSite ->
+            "Remove ${dialog.site.name} from your saved apps? This will not clear its session data."
+
+        SiteAction.ClearSession ->
+            "Clear cookies and local session data for ${dialog.site.name}? You may need to sign in again."
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(message) },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("Confirm")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+private fun buildBrowserSessionSettings(initialUrl: String): GeckoSessionSettings {
+    return GeckoSessionSettings.Builder()
+        .usePrivateMode(false)
+        .contextId(buildSiteSessionContextId(initialUrl))
+        .build()
+}
+
+private fun buildSiteSessionContextId(initialUrl: String): String {
+    val normalizedUrl = normalizeUrl(initialUrl) ?: return DEFAULT_GECKO_SESSION_CONTEXT_ID
+    val origin = originForUrl(normalizedUrl)?.lowercase(Locale.ROOT) ?: return DEFAULT_GECKO_SESSION_CONTEXT_ID
+    val sanitizedOrigin = buildString(origin.length) {
+        origin.forEach { ch ->
+            append(if (ch.isLetterOrDigit()) ch else '_')
+        }
+    }.trim('_')
+    return if (sanitizedOrigin.isBlank()) {
+        DEFAULT_GECKO_SESSION_CONTEXT_ID
+    } else {
+        "${GECKO_SESSION_CONTEXT_PREFIX}_$sanitizedOrigin"
+    }
+}
+
 private inline fun <reified T : android.os.Parcelable> Intent.parcelableExtra(key: String): T? {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         getParcelableExtra(key, T::class.java)
@@ -1632,6 +1750,44 @@ private inline fun <reified T : android.os.Parcelable> Intent.parcelableExtra(ke
 private fun hasAppPermission(context: Context, permission: String): Boolean {
     return ContextCompat.checkSelfPermission(context, permission) ==
         android.content.pm.PackageManager.PERMISSION_GRANTED
+}
+
+private fun completeContentPermissionRequest(
+    runtime: GeckoRuntime,
+    permission: GeckoSession.PermissionDelegate.ContentPermission,
+    result: GeckoResult<Int>,
+    value: Int
+) {
+    runCatching {
+        runtime.storageController.setPermission(permission, value)
+    }
+    result.complete(value)
+}
+
+private fun resolveNotificationLaunchUrl(sourceUrl: String?): String? {
+    return sourceUrl
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?.let(::normalizeUrl)
+}
+
+private fun launchMainActivity(context: Context, launchUrl: String?) {
+    context.startActivity(
+        Intent(context, MainActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            launchUrl?.let { putExtra(EXTRA_SHORTCUT_URL, it) }
+        }
+    )
+}
+
+private suspend fun clearSiteSession(context: Context, site: SavedSite): Boolean {
+    val contextId = buildSiteSessionContextId(site.url)
+    return withContext(Dispatchers.IO) {
+        runCatching {
+            GeckoRuntimeHolder.get(context).storageController.clearDataForSessionContext(contextId)
+        }.isSuccess
+    }
 }
 
 @SuppressLint("MissingPermission")
@@ -1653,6 +1809,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
         ?: "Website notification"
     val text = notification.text?.takeIf { it.isNotBlank() }
         ?: notification.source.orEmpty()
+    val launchUrl = resolveNotificationLaunchUrl(notification.source)
 
     val contentIntent = PendingIntent.getBroadcast(
         context,
@@ -1661,6 +1818,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
             action = ACTION_WEB_NOTIFICATION_CLICK
             putExtra(EXTRA_WEB_NOTIFICATION, notification)
             putExtra(EXTRA_WEB_NOTIFICATION_ID, notificationId)
+            launchUrl?.let { putExtra(EXTRA_SHORTCUT_URL, it) }
         },
         PENDING_INTENT_FLAGS
     )
@@ -1671,6 +1829,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
             action = ACTION_WEB_NOTIFICATION_DISMISS
             putExtra(EXTRA_WEB_NOTIFICATION, notification)
             putExtra(EXTRA_WEB_NOTIFICATION_ID, notificationId)
+            launchUrl?.let { putExtra(EXTRA_SHORTCUT_URL, it) }
         },
         PENDING_INTENT_FLAGS
     )
@@ -1683,7 +1842,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
         .setContentIntent(contentIntent)
         .setDeleteIntent(deleteIntent)
         .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
 
     if (notification.silent) {
@@ -1703,6 +1862,7 @@ private fun showWebNotification(context: Context, notification: WebNotification)
                 putExtra(EXTRA_WEB_NOTIFICATION, notification)
                 putExtra(EXTRA_WEB_NOTIFICATION_ID, notificationId)
                 putExtra(EXTRA_WEB_NOTIFICATION_ACTION, action.name)
+                launchUrl?.let { putExtra(EXTRA_SHORTCUT_URL, it) }
             },
             PENDING_INTENT_FLAGS
         )
@@ -1729,9 +1889,12 @@ private fun ensureWebNotificationChannel(context: Context) {
         NotificationChannel(
             WEB_NOTIFICATION_CHANNEL_ID,
             context.getString(R.string.web_notification_channel_name),
-            NotificationManager.IMPORTANCE_DEFAULT
+            NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = context.getString(R.string.web_notification_channel_description)
+            enableLights(true)
+            enableVibration(true)
+            setShowBadge(true)
         }
     )
 }
@@ -2101,7 +2264,7 @@ private fun createAppGeckoSession(
         GeckoSession.PromptDelegate.AuthPrompt
     ) -> GeckoResult<GeckoSession.PromptDelegate.PromptResponse>
 ): GeckoSession {
-    return GeckoSession().apply {
+    return GeckoSession(buildBrowserSessionSettings(initialUrl)).apply {
         contentDelegate = object : GeckoSession.ContentDelegate {
             override fun onTitleChange(session: GeckoSession, title: String?) {
                 onPageTitleChanged(title)
@@ -2710,6 +2873,16 @@ private data class SavedSite(
     val iconUrl: String?
 )
 
+private data class PendingSiteActionDialog(
+    val site: SavedSite,
+    val action: SiteAction
+)
+
+private enum class SiteAction {
+    DeleteSite,
+    ClearSession
+}
+
 private data class ManifestIcon(
     val src: String,
     val sizes: String
@@ -2746,7 +2919,9 @@ private const val SPLASH_EXIT_DURATION_MS = 360L
 private const val HOME_REVEAL_DELAY_MS = 90L
 private const val CHROME_COLOR_SAMPLE_INTERVAL_MS = 900L
 private const val APP_USER_AGENT = "PWADock/1.0"
-private const val WEB_NOTIFICATION_CHANNEL_ID = "web_notifications"
+private const val WEB_NOTIFICATION_CHANNEL_ID = "pwa_dock_messages"
+private const val GECKO_SESSION_CONTEXT_PREFIX = "site"
+private const val DEFAULT_GECKO_SESSION_CONTEXT_ID = "site_default"
 private const val ACTION_WEB_NOTIFICATION_CLICK = "com.norns.pwa2app.WEB_NOTIFICATION_CLICK"
 private const val ACTION_WEB_NOTIFICATION_DISMISS = "com.norns.pwa2app.WEB_NOTIFICATION_DISMISS"
 private const val PENDING_INTENT_FLAGS =
@@ -2781,6 +2956,7 @@ private fun HomePreview() {
             onOpenClicked = {},
             onCreateShortcutClicked = {},
             onDeleteClicked = {},
+            onClearSessionClicked = {},
             onSiteIconResolved = { _, _ -> }
         )
     }

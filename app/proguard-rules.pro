@@ -19,3 +19,7 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+-keep class com.norns.pwa2app.MainActivity { *; }
+-keep class com.norns.pwa2app.WebNotificationReceiver { *; }
+-keepattributes SourceFile,LineNumberTable
